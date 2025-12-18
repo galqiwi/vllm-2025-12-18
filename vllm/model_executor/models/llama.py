@@ -456,6 +456,7 @@ class LlamaModel(nn.Module):
             (".gate_up_proj", ".up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
+        # {"...self_attn.qkv_proj.codes": Tensor}
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
@@ -484,7 +485,12 @@ class LlamaModel(nn.Module):
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
+                # name = "...self_attn.q_proj.tq_tensor.meta" #  from safetensors
+                # weight_name = ".q_proj"
+                # param_name = ".qkv_proj"
                 name = name.replace(weight_name, param_name)
+                # name = "...self_attn.qkv_proj.tq_tensor.meta"
+
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
@@ -492,7 +498,10 @@ class LlamaModel(nn.Module):
                 if is_pp_missing_parameter(name, self):
                     continue
 
+                # name = "...self_attn.qkv_proj.tq_tensor.meta"
                 param = params_dict[name]
+                # param = Parameter(...) #  ...self_attn.qkv_proj.codes
+
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break

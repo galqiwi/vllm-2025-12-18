@@ -92,64 +92,107 @@ class TinyQuantLinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        num_shards = len(output_partition_sizes)
-        
-        # Create QuantizedLinear for each shard
-        layer.tinyquant_layers = [QuantizedLinear.empty() for _ in range(num_shards)]
-        
-        # Placeholder tq_tensors for vLLM weight loading
-        tq_tensors = nn.ParameterDict()
-        layer.register_module("tq_tensors", tq_tensors)
-        
-        # Get layer prefix (set in LinearBase.__init__)
-        prefix = getattr(layer, "prefix", "")
-        print("-------------------")
-        print("prefix", getattr(layer, "prefix", ""))
-        
-        # Determine param names from config
-        # For merged layers (qkv_proj), check constituent layers (q_proj, k_proj, v_proj)
-        param_names = self.quant_config.get_quantized_params(prefix)
-        print("param_names", param_names)
-        
-        if not param_names and num_shards > 1:
-            # Try merged layer constituents
-            base_prefix = prefix.rsplit(".", 1)[0] if "." in prefix else ""
-            layer_name = prefix.rsplit(".", 1)[-1] if "." in prefix else prefix
-            print("base_prefix", base_prefix)
-            print("layer_name", layer_name)
-            
-            # Map merged layer names to constituent parts
-            merged_layer_map = {
-                "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-                "gate_up_proj": ["gate_proj", "up_proj"],
-            }
-            constituent_names = merged_layer_map.get(layer_name, [])
-            print("constituent_names", constituent_names)
-            
-            # Try to find params from first constituent
-            for constituent in constituent_names:
-                constituent_prefix = f"{base_prefix}.{constituent}" if base_prefix else constituent
-                print("constituent_prefix", constituent_prefix)
-                param_names = self.quant_config.get_quantized_params(constituent_prefix)
-                print("param_names", param_names)
-                if param_names:
-                    break
-            print("-------------------")
-        
-        # Weight loader writes directly to tinyquant_layers[shard_idx].tq_tensors
-        def make_weight_loader(param_name: str):
-            def weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor, shard_id=None):
-                shard_idx = get_shard_index(shard_id)
-                # Write directly to the shard's tq_tensors
-                layer.tinyquant_layers[shard_idx].tq_tensors[param_name] = nn.Parameter(
-                    loaded_weight.cuda(), requires_grad=False
-                )
-            return weight_loader
+        """
+        Safetensors: self_attn.q_proj.tq_tensors.meta
 
-        for name in param_names:
-            param = nn.Parameter(torch.empty(0), requires_grad=False)
-            set_weight_attrs(param, {"ignore_warning": True, "weight_loader": make_weight_loader(name)})
-            tq_tensors[name] = param
+        Now: self_attn.qkv_proj.tq_tensors.meta.q
+
+
+        ----
+        prefix = "self_attn.qkv_proj"  # layer.prefix
+        prefix = '.'.join(prefix.split(".")[-1:])
+        layers = [
+            layer_name for layer_name in configdict.keys()
+            if layer_name.startswith(prefix)
+        ]
+        q: meta, foo, bar
+        k: meta, bar, baz
+        v: meta, fff
+
+        qkv_proj.tq_tensors.meta
+        qkv_proj.tq_tensors.foo
+        qkv_proj.tq_tensors.bar
+        qkv_proj.tq_tensors.baz
+        qkv_proj.tq_tensors.fff
+
+
+        qkv_proj.tq_tensors.meta.q
+        qkv_proj.tq_tensors.meta.k
+        """
+
+
+        layer.tq_tensor = torch.nn.ModuleDict()
+        # "...self_attn.qkv_proj" -- prefix
+        # from config:
+        # "...self_attn.q_proj" has (meta, ...)
+        # "...self_attn.k_proj" has (meta, ...)
+        # "...self_attn.v_proj" has (meta, ...)
+        # read self.quantization_config, get 'meta' name from it
+        layer.tq_tensor['meta'] = torch.nn.ParameterDict()
+
+        def custom_loader():
+            pass
+
+        layer.tq_tensor['meta'].weight_loader = custom_loader
+
+        # num_shards = len(output_partition_sizes)
+        #
+        # # Create QuantizedLinear for each shard
+        # layer.tinyquant_layers = [QuantizedLinear.empty() for _ in range(num_shards)]
+        #
+        # # Placeholder tq_tensors for vLLM weight loading
+        # tq_tensors = nn.ParameterDict()
+        # layer.register_module("tq_tensors", tq_tensors)
+        #
+        # # Get layer prefix (set in LinearBase.__init__)
+        # prefix = getattr(layer, "prefix", "")
+        # print("-------------------")
+        # print("prefix", getattr(layer, "prefix", ""))
+        #
+        # # Determine param names from config
+        # # For merged layers (qkv_proj), check constituent layers (q_proj, k_proj, v_proj)
+        # param_names = self.quant_config.get_quantized_params(prefix)
+        # print("param_names", param_names)
+        #
+        # if not param_names and num_shards > 1:
+        #     # Try merged layer constituents
+        #     base_prefix = prefix.rsplit(".", 1)[0] if "." in prefix else ""
+        #     layer_name = prefix.rsplit(".", 1)[-1] if "." in prefix else prefix
+        #     print("base_prefix", base_prefix)
+        #     print("layer_name", layer_name)
+        #
+        #     # Map merged layer names to constituent parts
+        #     merged_layer_map = {
+        #         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        #         "gate_up_proj": ["gate_proj", "up_proj"],
+        #     }
+        #     constituent_names = merged_layer_map.get(layer_name, [])
+        #     print("constituent_names", constituent_names)
+        #
+        #     # Try to find params from first constituent
+        #     for constituent in constituent_names:
+        #         constituent_prefix = f"{base_prefix}.{constituent}" if base_prefix else constituent
+        #         print("constituent_prefix", constituent_prefix)
+        #         param_names = self.quant_config.get_quantized_params(constituent_prefix)
+        #         print("param_names", param_names)
+        #         if param_names:
+        #             break
+        #     print("-------------------")
+        #
+        # # Weight loader writes directly to tinyquant_layers[shard_idx].tq_tensors
+        # def make_weight_loader(param_name: str):
+        #     def weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor, shard_id=None):
+        #         shard_idx = get_shard_index(shard_id)
+        #         # Write directly to the shard's tq_tensors
+        #         layer.tinyquant_layers[shard_idx].tq_tensors[param_name] = nn.Parameter(
+        #             loaded_weight.cuda(), requires_grad=False
+        #         )
+        #     return weight_loader
+        #
+        # for name in param_names:
+        #     param = nn.Parameter(torch.empty(0), requires_grad=False)
+        #     set_weight_attrs(param, {"ignore_warning": True, "weight_loader": make_weight_loader(name)})
+        #     tq_tensors[name] = param
 
     def apply(
         self,
